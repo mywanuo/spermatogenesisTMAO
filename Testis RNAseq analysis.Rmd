@@ -1,0 +1,408 @@
+---
+title: "Testis RNAseq analysis"
+author: "Shuo Wang"
+date: "2023-07-18"
+output: html_document
+---
+
+```{r setup, include=FALSE}
+knitr::opts_chunk$set(echo = TRUE)
+```
+
+
+```{r counts to TPM}
+rm(list = ls())
+library(tidyverse)
+
+exprcount <- rio::import("../data/testistmao.counts.txt")
+exprcount <- exprcount[, 1:10]
+colnames(exprcount) <- colnames(exprcount) %>%
+  str_replace("_sorted.bam", "")
+write.table(exprcount,
+  sep = "\t", row.names = F,
+  file = "../data/testistmao.countsname.txt"
+)
+```
+
+```{r}
+genelength <- rio::import("../data/featurecounts.txt")
+#### Counts to TPM Conversion ####
+# Note: The conversion should be based on the unfiltered raw counts matrix.
+### Extract 'Geneid' and 'Length' (transcript length) from the original output file of featureCounts (counts.txt) to calculate TPM.
+
+geneid_efflen <- subset(genelength, select = c("Geneid", "Length"))
+colnames(geneid_efflen) <- c("geneid", "efflen")
+
+### Extract the effective length (efflen) corresponding to each geneid in the counts matrix
+
+exprcount2tpm <- exprcount %>%
+  remove_rownames() %>%
+  column_to_rownames("Geneid")
+efflen <- geneid_efflen[
+  match(
+    rownames(exprcount2tpm),
+    geneid_efflen$geneid
+  ),
+  "efflen"
+]
+
+### Calculate TPM using the standard formula
+# TPM (Transcripts Per Kilobase Million): the number of transcripts per million mapped reads per kilobase of transcript length
+
+counts2TPM <- function(count = count, efflength = efflen) {
+  RPK <- count / (efflength / 1000) # Reads Per Kilobase (RPK): normalization based on transcript length (per 1,000 bases)
+  PMSC_rpk <- sum(RPK) / 1e6 # "Per million" scaling factor of RPK: normalization for sequencing depth
+  RPK / PMSC_rpk
+}
+
+tpm <- as.data.frame(apply(exprcount2tpm, 2, counts2TPM))
+colSums(tpm)
+write.table(tpm,
+  sep = "\t",
+  file = "../data/testistmao.tpm.txt"
+)
+```
+
+```{r}
+gtf <- rtracklayer::import(
+  "./gencode.vM32.annotation.gtf"
+) %>%
+  as.data.frame()
+# Only select the protein coding genes.
+exprcountmrna <- gtf %>%
+  dplyr::filter(type == "gene", gene_type == "protein_coding") %>%
+  dplyr::select(c(gene_name, gene_id, gene_type)) %>%
+  dplyr::inner_join(exprcount, by = c("gene_id" = "Geneid"))
+table(duplicated(exprcountmrna$gene_name))
+exprcountmrna <- exprcountmrna[!duplicated(exprcountmrna$gene_name), ]
+
+exprtpm <- tpm %>%
+  rownames_to_column(var = "Geneid")
+exprtpmmrna <- gtf %>%
+  dplyr::filter(type == "gene", gene_type == "protein_coding") %>%
+  dplyr::select(c(gene_name, gene_id, gene_type)) %>%
+  dplyr::inner_join(exprtpm, by = c("gene_id" = "Geneid"))
+table(duplicated(exprtpmmrna$gene_name))
+save(exprcountmrna, exprtpmmrna,
+  file = "../data/testistmao.count.tpm.mrna.symbol.Rdata"
+)
+```
+
+```{r}
+#### Initial filtering of lowly expressed genes #### (The filtering criteria are flexible and should be adjusted based on specific data)
+# Retain genes with counts greater than 1 in at least the number of replicate samples
+
+keep_feature <- rowSums(exprcount > 1) >= 2
+table(keep_feature)
+
+counts_filt <- exprcount[keep_feature, ]
+# Replace the original counts matrix with the filtered one (retain genes with higher expression)
+tpm_filt <- tpm[keep_feature, ]
+
+counts_raw <- exprcount
+counts <- counts_filt
+tpm <- tpm_filt
+
+save(counts_raw, counts, tpm,
+  file = "../data/testistmao.count.tpm.all.filt.ensemble.Rdata"
+)
+
+counts_raw <- gtf %>%
+  dplyr::filter(type == "gene") %>%
+  dplyr::select(c(gene_name, gene_id, gene_type)) %>%
+  dplyr::inner_join(counts_raw, by = c("gene_id" = "Geneid"))
+
+counts <- gtf %>%
+  dplyr::filter(type == "gene") %>%
+  dplyr::select(c(gene_name, gene_id, gene_type)) %>%
+  dplyr::inner_join(counts, by = c("gene_id" = "Geneid"))
+
+tpm <- tpm %>%
+  rownames_to_column(var = "Geneid")
+tpm <- gtf %>%
+  dplyr::filter(type == "gene") %>%
+  dplyr::select(c(gene_name, gene_id, gene_type)) %>%
+  dplyr::inner_join(tpm, by = c("gene_id" = "Geneid"))
+
+save(counts_raw, counts, tpm,
+     file='../data/testistmao.count.tpm.all.filt.symbol.duplicated.Rdata')
+```
+
+# DESeq2
+```{r}
+rm(list = ls())
+options(stringsAsFactors = F)
+
+library(DESeq2)
+library(BiocParallel)
+
+load("../data/testistmao.count.tpm.all.filt.symbol.duplicated.Rdata")
+metadata <- rio::import("../data/metadata.txt")
+
+aimsample <- metadata$ID[metadata$type %in% c("TMAO", "CON")]
+countsTMAO <- counts[counts$gene_type %in% "protein_coding", ] %>%
+  remove_rownames() %>%
+  column_to_rownames("gene_name") %>%
+  select(!c("gene_id", "gene_type"))
+metaTMAO <- metadata[metadata$type %in% c("TMAO", "CON"), ] %>%
+  remove_rownames() %>%
+  column_to_rownames(var = "ID")
+countsTMAO <- countsTMAO[, rownames(metaTMAO)]
+identical(colnames(countsTMAO), rownames(metaTMAO))
+
+save(countsTMAO, metaTMAO,
+  file = "../data/testistmao.count.mrna.filt.TMAO-ND.symbolforDE2.Rdata"
+)
+
+metaTMAO$group_list <- factor(metaTMAO$type, levels = c("CON", "TMAO"))
+
+exp <- "TMAO"
+ctr <- "CON"
+
+# Construct the DESeqDataSet (dds) object
+if (T) {
+  dds <- DESeqDataSetFromMatrix(
+    countData = countsTMAO,
+    colData = metaTMAO,
+    design = ~group_list
+  )
+}
+
+dds$group_list <- relevel(dds$group_list, ref = ctr)
+
+dds <- DESeq(dds)
+res <- results(dds, contrast = c("group_list", exp, ctr))
+resOrdered <- res[order(res$padj), ] # Order the results by adjusted p-value (padj) in ascending order
+tempDEG <- as.data.frame(resOrdered)
+DEG_DEseq2 <- na.omit(tempDEG)
+head(DEG_DEseq2)
+write.table(DEG_DEseq2,sep = "\t",
+            file = "../result/TMAO-CON.DEG_DEseq2.txt")
+```
+
+```{r}
+library(ggVolcano)
+## 筛选条件设置
+log2FC_cutoff <- 1
+padj_cutoff <- 0.05
+DEG_DEseq2$regulate <- as.factor(
+  ifelse(DEG_DEseq2$padj < padj_cutoff & abs(DEG_DEseq2$log2FoldChange) > log2FC_cutoff,
+    ifelse(DEG_DEseq2$log2FoldChange > log2FC_cutoff, "Up", "Down"), "Normal"
+  )
+)
+
+table(DEG_DEseq2$regulate)
+
+changedata <- DEG_DEseq2[DEG_DEseq2$regulate %in% c("Up", "Down"), ]
+
+top10 <- rownames(
+  head(
+    changedata[order(changedata[, "log2FoldChange"], decreasing = TRUE), ], 10
+  )
+)
+
+tail10 <- rownames(
+  tail(
+    changedata[order(changedata[, "log2FoldChange"], decreasing = TRUE), ], 10
+  )
+)
+
+library(EnhancedVolcano)
+dataforp <- DEG_DEseq2 %>%
+  rownames_to_column(var = "id")
+
+
+group <- ifelse(
+  dataforp$log2FoldChange < -log2FC_cutoff & dataforp$padj < padj_cutoff, "#2c4092",
+  ifelse(dataforp$log2FoldChange > log2FC_cutoff & dataforp$padj < padj_cutoff, "#cd2e26",
+    "#b5b5b5"
+  )
+)
+
+group[is.na(group)] <- "#b5b5b5"
+names(group)[group == "#cd2e26"] <- "Up"
+names(group)[group == "#b5b5b5"] <- "Normal"
+names(group)[group == "#2c4092"] <- "Down"
+
+evpTMAO <- EnhancedVolcano(dataforp,
+  x = "log2FoldChange",
+  y = "padj",
+  lab = dataforp$id,
+  pCutoff = 10e-1 / 20,
+  FCcutoff = 1,
+  pointSize = 3,
+  labSize = 4,
+  xlim = c(-4, 4),
+  ylim = c(0, 15),
+  selectLab = c(top10, tail10),
+  xlab = bquote(~ Log[2] ~ "Fold change"),
+  labCol = "black",
+  labFace = "bold",
+  boxedLabels = TRUE,
+  drawConnectors = TRUE,
+  widthConnectors = 0.8,
+  endsConnectors = "last",
+  colConnectors = "black",
+  max.overlaps = 200,
+  colCustom=group,
+  colAlpha=0.6
+) # 调整透明度
+
+pdf("../result/TMAO-CON.EnhancedVolcano.pdf",width = 8,height = 6)
+evpTMAO
+dev.off()
+```
+
+# GO GSEA
+```{r}
+rm(list = ls())
+options(stringsAsFactors = F)
+
+library(clusterProfiler)
+library(dplyr)
+library(ggplot2)
+library(enrichplot)
+library(cowplot)
+library(org.Mm.eg.db)
+```
+
+```{r TMAO}
+degTMAO <- read.table("../result/TMAO-CON.DEG_DEseq2.txt", row.names = 1)
+
+log2FC_cutoff <- 1
+padj_cutoff <- 0.05
+degTMAO$regulate <- as.factor(
+  ifelse(degTMAO$padj < padj_cutoff & abs(degTMAO$log2FoldChange) > log2FC_cutoff,
+    ifelse(degTMAO$log2FoldChange > log2FC_cutoff, "Up", "Down"), "Normal"
+  )
+)
+table(degTMAO$regulate)
+
+deggene <- degTMAO[degTMAO$regulate %in% c("Up", "Down"), ] %>%
+  rownames()
+
+gene.id <- bitr(
+  deggene,
+  fromType = "SYMBOL",
+  toType = c("ENTREZID", "ENSEMBL"),
+  OrgDb = org.Mm.eg.db
+)
+```
+
+## # Enrichment analysis of downregulated genes
+```{r}
+deggene <- degTMAO[degTMAO$regulate %in% c("Down"), ] %>%
+  rownames()
+
+gene.id <- bitr(
+  deggene,
+  fromType = "SYMBOL",
+  toType = c("ENTREZID", "ENSEMBL"),
+  OrgDb = org.Mm.eg.db
+)
+
+# 分析ALL
+goALLdown <- enrichGO(
+  gene = gene.id$ENTREZID,
+  OrgDb = org.Mm.eg.db,
+  ont = "ALL",
+  pAdjustMethod = "BH",
+  pvalueCutoff = 0.05,
+  readable = TRUE
+)
+
+head(goALLdown)
+
+p1 <- dotplot(goALLdown, showCategory = 20, label_format = 70) +
+  theme(panel.grid = element_blank()) +
+  theme(
+    axis.title = element_text(size = 12, color = "black"),
+    axis.text.y = element_text(size = 12),
+    legend.title = element_text(size = 12)
+  ) +
+  scale_color_gradient(high = "#2c4092", low = "#cd2e26")
+```
+
+
+## GSEA
+```{r}
+library(clusterProfiler)
+library(org.Mm.eg.db)
+library(GseaVis)
+
+degTMAO <- read.table("../result/TMAO-CON.DEG_DEseq2.txt", row.names = 1) %>%
+  rownames_to_column(var = "symbol")
+
+# enrichment
+gsea_HFDdata <- bitr(degTMAO$symbol,
+  fromType = "SYMBOL",
+  toType = "ENTREZID",
+  OrgDb = "org.Mm.eg.db"
+) %>%
+  inner_join(degTMAO, by = c("SYMBOL" = "symbol")) %>%
+  arrange(desc(log2FoldChange))
+
+hfd_geneList <- gsea_HFDdata$log2FoldChange
+names(hfd_geneList) <- gsea_HFDdata$ENTREZID
+hfd_geneList <- sort(hfd_geneList, decreasing = T)
+```
+
+```{r}
+# enrichment
+hfd_ego <- gseGO(
+  geneList = hfd_geneList,
+  OrgDb = org.Mm.eg.db,
+  ont = "ALL",
+  minGSSize = 10,
+  maxGSSize = 500,
+  pvalueCutoff = 1,
+  verbose = FALSE
+)
+```
+
+```{r}
+aimgsea <- hfd_ego %>%
+  filter(abs(NES)>1,p.adjust<0.25)
+for (i in 1:length(aimgsea$Description)) {
+  plotlist <- gseaplot2(aimgsea,
+                        geneSetID = i,
+                        title = aimgsea$Description[i], color = "red",
+                        base_size = 14,
+                        rel_heights = c(1, 0.2, 0.4),
+                        subplots = 1:3,
+                        pvalue_table = T,
+                        ES_geom = "line"
+  ) # line or dot
+  print(plotlist)
+}
+```
+
+
+```{r}
+hfd_ekegg <- gseKEGG(hfd_geneList, 
+                        organism = "mmu",
+                        pvalueCutoff = 1,
+                        nPerm = 1000, 
+                        minGSSize = 10, 
+                        maxGSSize = 500,
+                        verbose = TRUE, 
+                        seed = FALSE, 
+                        by = "fgsea")
+
+aimgsea <- hfd_ekegg %>%
+  filter(abs(NES)>1,p.adjust<0.25)
+
+for (i in 1:length(aimgsea$Description)) {
+  plotlist <- gseaplot2(aimgsea,
+                        geneSetID = i,
+                        title = aimgsea$Description[i], color = "red",
+                        base_size = 14,
+                        rel_heights = c(1, 0.2, 0.4),
+                        subplots = 1:3,
+                        pvalue_table = T,
+                        ES_geom = "line"
+  )
+  print(plotlist)
+}
+```
+
