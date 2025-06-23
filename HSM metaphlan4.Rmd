@@ -1,0 +1,360 @@
+---
+title: "metagenomics analysis"
+author: "Shuo Wang"
+date: "2024-08-11"
+output: html_document
+---
+
+> Guangdong **metagenomics analysis**
+> Created by Shuo Wang on 2024-08-11
+> Contact mywanuo@163.com
+> All rights reserved.
+
+
+```{r setup, include=FALSE}
+knitr::opts_chunk$set(echo = TRUE)
+```
+
+```{r}
+# Draw a three-line table
+table1_base <- table1(
+  ~.,
+  data = metadata[, !colnames(metadata) %in% colname_unuse],
+  overall = "Total"
+)
+```
+
+
+```{r}
+rm(list = ls())
+options(stringsAsFactors = F)
+
+library(file2meco)
+library(microeco)
+library(phyloseq)
+library(tidyverse)
+library(dplyr)
+library(ggpubr)
+library(vegan)
+library(Maaslin2)
+library(microbiome)
+library(stringr)
+```
+
+```{r}
+rm(list = ls())
+options(stringsAsFactors = F)
+
+library(phyloseq)
+library(tidyverse)
+```
+
+## Species stacking plot
+```{r}
+stack_s10d1 <- ggplot(ggdata_10d1, aes(x = Group, y = value, fill = Species)) +
+  geom_bar(stat = "identity", position = "fill") +
+  labs(x = "", y = "Abundance of species(%)") +
+  scale_fill_manual(values = rev(pal10)) +
+  ggthemes::theme_base() +
+  theme(
+    panel.border = element_rect(linewidth = 1.2),
+    axis.title.x = element_blank(),
+    axis.ticks.x = element_blank(),
+    axis.text.x = element_text(angle = 45, hjust = 1, size = 16)
+  ) +
+  guides(fill = guide_legend(ncol = 1, byrow = TRUE))
+```
+
+### Genus stacking plot
+
+
+```{r}
+pal10 <- c(
+  "#E41A1C", "#377EB8", "#4DAF4A", "#984EA3", "#FF7F00", "#F9F932",
+  "#00F5FF", "#F781BF", "#A65628", "#20B2AA", "#959595"
+)
+show_col(pal10)
+
+stack_g10 <- ggplot(ggdata_g10, aes(x = Sample, y = value, fill = Genus)) +
+  geom_bar(stat = "identity", width = 1) +
+  labs(fill = "Genus", x = "Sample", y = "Abundance of Genus(%)") +
+  theme(axis.text.x = element_text(angle = 80, vjust = 0.5)) +
+  theme_bw() +
+  theme(
+    axis.text.x = element_blank(),
+    axis.ticks.x = element_blank(),
+    legend.position = "bottom"
+  ) +
+  guides(fill = guide_legend(ncol = 6)) +
+  scale_y_continuous(expand = c(0, 0)) +
+  facet_nested(. ~ Group,
+    drop = T, scale = "free", space = "free", switch = "y",
+    strip = strip_nested(
+      background_x = elem_list_rect(fill = c("#91D1C2FF", "#F39B7FFF")),
+      text_x = element_text(size = 14),
+      by_layer_x = F
+    )
+  ) +
+  theme(panel.spacing.x = unit(0, "cm")) +
+  scale_fill_manual(values = rev(pal10))
+```
+
+```{r}
+stack_g20d1 <- ggplot(ggdata_g20d1, aes(x = Group, y = value, fill = Genus)) +
+  geom_bar(stat = "identity", position = "fill") +
+  labs(x = "", y = "Abundance of Genus(%)") +
+  scale_fill_manual(values = rev(pal20)) +
+  ggthemes::theme_base() +
+  theme(
+    panel.border = element_rect(linewidth = 1.2),
+    axis.title.x = element_blank(),
+    axis.ticks.x = element_blank(),
+    axis.text.x = element_text(angle = 45, hjust = 1, size = 16)
+  ) +
+  guides(fill = guide_legend(ncol = 1, byrow = TRUE))
+```
+
+
+## Alpha
+
+```{r}
+rm(list = ls())
+options(stringsAsFactors = F)
+
+library(tidyverse)
+library(vegan)
+library(magrittr)
+library(ggpubr)
+```
+
+```{r}
+alpha_diversity <- function(x, tree = NULL) {
+  Shannon <- vegan::diversity(x, index = "shannon", base = 2)
+  Simpson <- vegan::diversity(x, index = "simpson")
+  goods_Coverage <- 1 - rowSums(x == 1) / rowSums(x)
+  Shannon <- sprintf("%0.4f", Shannon)
+  Simpson <- sprintf("%0.4f", Simpson)
+  goods_Coverage <- sprintf("%0.4f", goods_Coverage)
+  result <- data.frame(
+    sample = rownames(x), Shannon, Simpson, goods_Coverage
+  )
+}
+```
+
+```{r}
+alpha <- alpha_diversity(t(metaphlan_species))
+
+ggviolin(alpha,
+  "group", "Shannon",
+  fill = "group",
+  palette = c("#3f529f", "#8c2e2e"),
+  legend = "none",
+  font.x = 15, font.y = 15,
+  x.text.angle = 45, y.text.angle = 0,
+  font.tickslab = c(15, "plain", "black"),
+  add = "boxplot", add.params = list(width = 0.1, linetype = 1)
+) +
+  labs(x = NULL, y = NULL, title = "Shannon") +
+  ggthemes::theme_base() +
+  theme(
+    panel.border = element_rect(linewidth = 1.5),
+    axis.ticks.x = element_blank()
+  ) +
+  geom_signif(
+    comparisons = df_cmp,
+    map_signif_level = F,
+    textsize = 3,
+    test = t.test,
+    step_increase = 0.2,
+    size = 1,
+    tip_length = 0.02,
+    y_position = 1.2*max(alpha$Shannon)
+  )
+
+ggviolin(alpha,
+  "group", "Simpson",
+  fill = "group",
+  palette = c("#3f529f", "#8c2e2e"),
+  legend = "none",
+  font.x = 15, font.y = 15,
+  x.text.angle = 45, y.text.angle = 0,
+  font.tickslab = c(15, "plain", "black"),
+  add = "boxplot", add.params = list(width = 0.1, linetype = 1)
+) +
+  labs(x = NULL, y = NULL, title = "Simpson") +
+  ggthemes::theme_base() +
+  theme(
+    panel.border = element_rect(linewidth = 1.5),
+    # axis.text.x = element_blank(),
+    axis.ticks.x = element_blank()
+  ) +
+  geom_signif(
+    comparisons = df_cmp,
+    map_signif_level = F,
+    textsize = 3,
+    test = t.test,
+    step_increase = 0.2,
+    size = 1,
+    tip_length = 0.02,
+    y_position = 1.2*max(alpha$Simpson)
+  )
+```
+
+
+# PCoA data
+
+```{r}
+library(tidyverse)
+library(vegan)
+library(ggthemes)
+library(ggExtra)
+```
+
+```{r}
+bray <- vegdist(t(metaphlan_species), method = "bray")
+bray <- as.matrix(bray)
+pcoa <- cmdscale(bray, k = 20, eig = T, x.ret = TRUE)
+mds.var.per <- round(pcoa$eig / sum(pcoa$eig) * 100, 1)
+pcoa_data <- data.frame({
+  pcoa$point
+})
+pcoa_data$Sample_ID <- rownames(pcoa_data)
+names(pcoa_data)[1:20] <- paste0("PCoA", 1:20)
+eig <- pcoa$eig
+eig_percent <- round(pcoa$eig / sum(pcoa$eig) * 100, 1)
+poi <- pcoa$points
+poi <- as.data.frame(poi)
+pcoa_result <- pcoa_data %>%
+  left_join(metadata[, c("m_seqid", "diagnosis1")], by = c("Sample_ID" = "m_seqid"))
+head(pcoa_result)
+
+dune.div <- adonis2(t(metaphlan_species) ~ diagnosis1, data = metadata, permutations = 999, method = "bray")
+dune.div
+dune_adonis <- paste0("adonis R2: ", round(dune.div$R2, 2), "; P-value: ", dune.div$`Pr(>F)`)
+dune_adonis
+
+statuscol <- c("#5DB1DD", "#C75127")
+names(statuscol) <- c("Normal", "Abnormal")
+
+p_speciesbray2 <- ggplot(data = pcoa_result, aes(x = PCoA1, y = PCoA2)) +
+  geom_point(size = 4, aes(fill = diagnosis1, color = diagnosis1), shape = 21) +
+  scale_color_manual(values = statuscol) +
+  xlab(paste("PCoA 1 (", mds.var.per[1], "%)", sep = "")) +
+  ylab(paste("PCoA 2 (", mds.var.per[2], "%)", sep = "")) +
+  theme_bw() +
+  theme(
+    panel.grid.major = element_blank(),
+    panel.grid.minor = element_blank(),
+    axis.text.x = element_text(size = 16, colour = "black"),
+    axis.text.y = element_text(size = 16, colour = "black"),
+    axis.title.x = element_text(size = 16, colour = "black"),
+    axis.title.y = element_text(size = 16, colour = "black"),
+    panel.border = element_rect(colour = "black", fill = NA, size = 2),
+    plot.title = element_text(size = 16, hjust = 0.5)
+  ) +
+  theme(
+    legend.position = c(.82, .88),
+    legend.title = element_blank(),
+    legend.key.height = unit(.7, "cm"),
+    legend.key.width = unit(.3, "cm"),
+    legend.text = element_text(size = 16, colour = "black"),
+    legend.background = element_rect(fill = "white", color = "black")
+  ) +
+  annotate(
+    geom = "text", x = -0.23, y = 0.55, col = "black", size = 3.2, parse = T,
+    label = "atop(R^2==0.02,PERMANOVA_P==0.034)"
+  ) + # PERMANOVA P=0.034 \n R^2=0.02
+  geom_hline(aes(yintercept = 0), colour = "#BEBEBE", linetype = "dashed") +
+  geom_vline(aes(xintercept = 0), colour = "#BEBEBE", linetype = "dashed") +
+  stat_ellipse(
+    data = pcoa_result,
+    geom = "polygon",
+    level = 0.9,
+    linetype = 2,
+    linewidth = 0.5,
+    aes(colour = diagnosis1, fill = diagnosis1),
+    alpha = 0.1,
+    show.legend = T
+  ) +
+  scale_fill_manual(values = c(c("#5DB1DD", "#C75127")))
+
+p_speciesbray2 <- ggMarginal(
+  p_speciesbray2,
+  type = c("density"),
+  margins = "both",
+  size = 3.5,
+  groupColour = F,
+  groupFill = T
+)
+```
+
+# lefse
+```{r}
+rm(list = ls())
+options(stringsAsFactors = F)
+
+library(tidyverse)
+library(microeco)
+```
+
+
+```{r}
+meco_data
+meco_data$tax_table %<>% tidy_taxonomy
+
+meco_data$tax_table %<>% base::subset(Kingdom == "k__Archaea" | Kingdom == "k__Bacteria")
+
+meco_data$tidy_dataset()
+print(meco_data)
+
+lefse_Species <- trans_diff$new(
+  dataset = meco_data,
+  method = "lefse",
+  group = "diagnosis1",
+  taxa_level = "Species",
+  alpha = 0.05,
+  p_adjust_method = "none",
+  lefse_subgroup = NULL
+)
+
+lefse_Genus <- trans_diff$new(
+  dataset = meco_data,
+  method = "lefse",
+  group = "diagnosis1",
+  taxa_level = "Genus",
+  alpha = 0.05,
+  p_adjust_method = "none",
+  lefse_subgroup = NULL
+)
+```
+
+```{r}
+p_lefse_Genus <- lefse_Genus$plot_diff_bar(
+  threshold = 2, width = 0.8,
+  group_order = c("Abnormal", "Normal")
+) +
+  scale_color_manual(values = c( "#8c2e2e", "#3f529f")) +
+  scale_fill_manual(values = c( "#8c2e2e", "#3f529f")) +
+  ggthemes::theme_base() +
+  theme(
+    panel.border = element_rect(linewidth = 1.2),
+    plot.background = element_blank(),
+    axis.ticks.x = element_line(linewidth = 1.0),
+    axis.ticks.y = element_line(linewidth = 1.0)
+  )
+
+p_lefse_Species <- lefse_Species$plot_diff_bar(
+  threshold = 2, width = 0.8,
+  group_order = c("Abnormal", "Normal")
+) +
+  scale_color_manual(values = c( "#8c2e2e", "#3f529f")) +
+  scale_fill_manual(values = c( "#8c2e2e", "#3f529f")) +
+  ggthemes::theme_base() +
+  theme(
+    panel.border = element_rect(linewidth = 1.2),
+    plot.background = element_blank(),
+    # axis.text.x = element_blank(),
+    axis.ticks.x = element_line(linewidth = 1.0),
+    axis.ticks.y = element_line(linewidth = 1.0)
+  )
+```
